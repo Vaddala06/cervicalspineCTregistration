@@ -1,0 +1,158 @@
+pip install SimpleITK
+
+moving_path= '/content/drive/MyDrive/sub-gl090/segmentations/vertebrae_C4.nii.gz'
+fixed_path = '/content/drive/MyDrive/sub-gl124/segmentations/vertebrae_C4.nii.gz'#same for everything
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+#!/usr/bin/env python
+
+import SimpleITK as sitk
+import sys
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+
+def command_iteration(method):
+    print(
+        f"{method.GetOptimizerIteration():3} "
+        + f"= {method.GetMetricValue():10.5f} "
+        + f": {method.GetOptimizerPosition()}"
+    )
+
+def registration (moving_path, fixed_path):
+  moving = sitk.ReadImage(moving_path, sitk.sitkFloat32)
+  fixed = sitk.ReadImage(fixed_path, sitk.sitkFloat32)
+  numberOfBins = 50
+  samplingPercentage = 0.01
+  tx = sitk.CenteredTransformInitializer(
+  fixed, moving, sitk.Euler3DTransform(),sitk.CenteredTransformInitializerFilter.MOMENTS)
+  R = sitk.ImageRegistrationMethod()
+  R.SetMetricAsCorrelation()
+  R.SetMetricAsMattesMutualInformation(numberOfBins)
+  R.SetShrinkFactorsPerLevel([4,2,1])
+  R.SetSmoothingSigmasPerLevel( [4,2,1] )
+  R.SetMetricSamplingPercentage(samplingPercentage, sitk.sitkWallClock)
+  R.SetMetricSamplingStrategy(R.RANDOM)
+  R.SetOptimizerAsRegularStepGradientDescent(1.0, 1e-8, 500,0.5,1e-8)
+  R.SetOptimizerScalesFromPhysicalShift()
+  R.SetInitialTransform(tx)
+  R.SetInterpolator(sitk.sitkNearestNeighbor)
+  R.AddCommand(sitk.sitkIterationEvent, lambda: command_iteration(R))
+  out = R.Execute(fixed, moving)
+  print(out)
+  print(f"Optimizer stop condition: {R.GetOptimizerStopConditionDescription()}")
+  print(f" Iteration: {R.GetOptimizerIteration()}")
+  print(f" Metric value: {R.GetMetricValue()}")
+  sitk.WriteTransform(out, "euler2D.tfm")
+  return out
+
+outTx = registration(moving_path, fixed_path)
+
+def getTmatrix (moving_path, fixed_path):
+  rotation_matrix = np.array(outTx.GetMatrix()).reshape((3, 3))
+  translation = np.array(outTx.GetTranslation())
+  t_matrix = np.eye(4)
+  t_matrix[:3, :3] = rotation_matrix
+  t_matrix[:3, 3] = translation
+  print(t_matrix)
+  return t_matrix
+
+t_matrix = getTmatrix(moving_path, fixed_path)
+
+import nibabel as nib
+n = nib.load (fixed_path)
+n.affine
+
+affine_matrix = np.array([[0.3125, 0.0, 0.0, 0.0],
+                   [0.0, 0.3125, 0.0, 0.0],
+                   [0.0, 0.0, 1.25, 0.0],
+                   [0.0, 0.0, 0.0, 1.0]])
+inverse_affine_matrix = np.linalg.inv(affine_matrix)
+pointtop = np.array([[200],
+                  [191],
+                  [122],
+                    [1]])
+pointbl = np.array([[137],
+                    [218],
+                    [122],
+                      [1]])
+pointbr = np.array([[257],
+                    [233],
+                    [122],
+                      [1]])
+
+def converttomm(t_matrix, point):
+  from SimpleITK.extra import TransformToDisplacementFieldFilter
+  convertedmm_point = np.dot(affine_matrix, point)
+  print (convertedmm_point)
+  return convertedmm_point
+
+mmpointtop = converttomm(t_matrix, pointtop)
+mmpointbl = converttomm(t_matrix, pointbl)
+mmpointbr = converttomm(t_matrix, pointbr)
+
+def transformpoint(t_matrix, mmpoint ):
+  transformedpoint = np.dot(t_matrix, mmpoint)
+  print (transformedpoint)
+  return transformedpoint
+
+transformedpointtop = transformpoint(t_matrix, mmpointtop)
+transformedpointbl = transformpoint(t_matrix, mmpointbl)
+transformedpointbr = transformpoint(t_matrix, mmpointbr)
+
+def converttopixels(inverse_affine_matrix, transformedpoint):
+  convertedpixel_point = np.dot(inverse_affine_matrix, transformedpoint )
+  print (convertedpixel_point)
+  return convertedpixel_point
+
+finalpointtop = converttopixels(inverse_affine_matrix, transformedpointtop)
+finalpointbl = converttopixels(inverse_affine_matrix, transformedpointbl)
+finalpointbr = converttopixels(inverse_affine_matrix, transformedpointbr)
+
+moving = sitk.ReadImage(moving_path, sitk.sitkFloat32)
+fixed = sitk.ReadImage(fixed_path, sitk.sitkFloat32)
+
+def visualization():
+  moving_array = sitk.GetArrayFromImage(moving)
+  fixed_array = sitk.GetArrayFromImage(fixed)
+  fig, ax = plt.subplots()
+  ax.imshow(moving_array[103, :, :], cmap='gray')
+  #ax.imshow(fixed_array[123, :, :], cmap='gray')
+
+  transformed_points = [finalpointtop[:2], finalpointbl[:2], finalpointbr[:2] ]
+  labels = ['Top Point', 'Bottom Left Point', 'Bottom Right Point']
+  for point, label in zip(transformed_points, labels):
+    ax.scatter(point[0], point[1], c='red', marker='o', label=label)
+  ax.legend()
+  plt.show()
+
+visualization()
+
+# %env SITK_SHOW_COMMAND C://Users//myi16//Downloads//fiji-win64.zip//Fiji.app//ImageJ-win64
+if "SITK_NOSHOW" not in os.environ:
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetReferenceImage(fixed)
+    resampler.SetInterpolator(sitk.sitkNearestNeighbor)
+    resampler.SetDefaultPixelValue(0)
+    resampler.SetTransform(outTx)
+    out = resampler.Execute(moving)
+    simg1 = sitk.Cast(sitk.RescaleIntensity(fixed), sitk.sitkUInt8)
+    simg2 = sitk.Cast(out, sitk.sitkUInt8)
+    cimg = sitk.Compose(simg1, simg2, simg1 // 2.0 + simg2 // 2.0)
+    sitk.WriteImage(simg2,'/content/drive/MyDrive/resultc7.nii.gz')
+
+import SimpleITK as sitk
+import matplotlib.pyplot as plt
+
+
+cimg_array = sitk.GetArrayFromImage(cimg)
+
+num_slices = cimg_array.shape[0]
+for slice_idx in range(num_slices):
+    plt.imshow(cimg_array[slice_idx, :, :], cmap='gray')
+    plt.title(f"Slice {slice_idx}")
+    plt.show()
